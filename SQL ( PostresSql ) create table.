@@ -1,0 +1,12 @@
+create table employee
+(
+sr_no serial  unique,
+empname varchar (100) not null,
+email varchar (100)  Not null,
+amount numeric ,
+proof bytea,
+proofname varchar (200),
+description text not null,
+status varchar (20) default 'pending',
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
