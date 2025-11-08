@@ -7,6 +7,10 @@ import java.awt.geom.*;
 import java.util.*;
 import java.text.SimpleDateFormat;
 import javax.swing.border.*;
+import java.io.File;
+import java.util.Properties;
+import javax.mail.*;
+import javax.mail.internet.*;
 
 // Main Application Class with Custom Graphics
 public class ExpenseClaimSystem extends JFrame {
@@ -1013,38 +1017,57 @@ public class ExpenseClaimSystem extends JFrame {
                     return;
                 }
                 
-                ExpenseClaim claim = new ExpenseClaim(
-                    claims.size() + 1,
-                    currentUser,
-                    currentDepartment,
-                    currentIP,
-                    type,
-                    amount,
-                    desc,
-                    selectedFilePath[0]
-                );
-                claims.add(claim);
+                // Extract employee name and email from currentUser
+                // Format: "username (email@example.com)"
+                String empname = currentUser.substring(0, currentUser.indexOf("(")).trim();
+                String email = currentUser.substring(currentUser.indexOf("(") + 1, currentUser.indexOf(")"));
                 
-                networkLog.append("\n[" + new SimpleDateFormat("HH:mm:ss").format(new Date()) + "]\n");
-                networkLog.append("→ " + currentIP + " (Employee PC) - Sending claim data...\n");
-                networkLog.append("→ 192.168.40.30 (App-Server) - Processing claim...\n");
-                networkLog.append("→ 192.168.40.40 (DB-Server) - Storing claim #" + claim.getId() + "\n");
-                networkLog.append("→ 192.168.40.20 (Email-Server) - Notification sent\n");
-                networkLog.append("→ 192.168.30.10 (Finance PC) - New claim received!\n");
+                // Create File object from selected path
+                java.io.File proofFile = new java.io.File(selectedFilePath[0]);
                 
-                showStyledMessage(
-                    "Claim submitted successfully!\n\n" +
-                    "Claim ID: " + claim.getId() + "\n" +
-                    "Amount: Rs " + amount + "\n" +
-                    "Proof: " + new java.io.File(selectedFilePath[0]).getName() + "\n\n" +
-                    "Network Route:\n" + currentIP + " → App Server → DB Server → Finance",
-                    "Success", JOptionPane.INFORMATION_MESSAGE);
+                // Insert into database using DAO
+                ClaimDAO dao = new ClaimDAO();
+                boolean success = dao.insertClaim(empname, email, amount, desc, proofFile);
                 
-                amountField.setText("");
-                descArea.setText("");
-                selectedFilePath[0] = null;
-                fileLabel.setText("No file selected");
-                fileLabel.setForeground(new Color(120, 120, 120));
+                if (success) {
+                    // Also add to in-memory list for UI
+                    ExpenseClaim claim = new ExpenseClaim(
+                        claims.size() + 1,
+                        currentUser,
+                        currentDepartment,
+                        currentIP,
+                        type,
+                        amount,
+                        desc,
+                        selectedFilePath[0]
+                    );
+                    claims.add(claim);
+                    
+                    networkLog.append("\n[" + new SimpleDateFormat("HH:mm:ss").format(new Date()) + "]\n");
+                    networkLog.append("→ " + currentIP + " (Employee PC) - Sending claim data...\n");
+                    networkLog.append("→ 192.168.40.30 (App-Server) - Processing claim...\n");
+                    networkLog.append("→ 192.168.40.40 (DB-Server) - Storing in PostgreSQL\n");
+                    networkLog.append("→ 192.168.40.20 (Email-Server) - Notification sent\n");
+                    networkLog.append("→ 192.168.30.10 (Finance PC) - New claim received!\n");
+                    
+                    showStyledMessage(
+                        "Claim submitted successfully!\n\n" +
+                        "Employee: " + empname + "\n" +
+                        "Amount: Rs " + amount + "\n" +
+                        "Proof: " + proofFile.getName() + "\n" +
+                        "Status: Stored in PostgreSQL Database\n\n" +
+                        "Network Route:\n" + currentIP + " → App Server → DB Server → Finance",
+                        "Success", JOptionPane.INFORMATION_MESSAGE);
+                    
+                    // Clear form
+                    amountField.setText("");
+                    descArea.setText("");
+                    selectedFilePath[0] = null;
+                    fileLabel.setText("No file selected");
+                    fileLabel.setForeground(new Color(120, 120, 120));
+                } else {
+                    showStyledMessage("Failed to submit claim to database!", "Error", JOptionPane.ERROR_MESSAGE);
+                }
                 
             } catch (NumberFormatException ex) {
                 showStyledMessage("Please enter valid amount!", "Error", JOptionPane.ERROR_MESSAGE);
@@ -1063,6 +1086,7 @@ public class ExpenseClaimSystem extends JFrame {
         
         return panel;
     }
+    
     
     // Manager Panel
     private JPanel createManagerPanel() {
@@ -1101,7 +1125,7 @@ public class ExpenseClaimSystem extends JFrame {
         tableTitle.setForeground(CHAI_DARK_BROWN);
         tableCard.add(tableTitle, BorderLayout.NORTH);
         
-        String[] columns = {"ID", "Employee", "Department", "Type", "Amount", "Status", "Date", "Proof"};
+        String[] columns = {"ID", "Employee", "Email", "Type", "Amount", "Status", "Date", "Proof"};
         DefaultTableModel tableModel = new DefaultTableModel(columns, 0) {
             public boolean isCellEditable(int row, int column) { return false; }
         };
@@ -1182,44 +1206,155 @@ public class ExpenseClaimSystem extends JFrame {
         contentPanel.add(buttonPanel, BorderLayout.SOUTH);
         panel.add(contentPanel, BorderLayout.CENTER);
         
-        // Event Listeners
+        // ============= EVENT LISTENERS =============
+        
+        // APPROVE BUTTON - with email notification
         approveBtn.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row >= 0) {
-                int id = (int) tableModel.getValueAt(row, 0);
-                for (ExpenseClaim claim : claims) {
-                    if (claim.getId() == id) {
-                        claim.setStatus("Approved");
-                        refreshTable(tableModel);
-                        showNetworkActivity("Approval", "192.168.30.10", claim.getEmployeeIP());
-                        showStyledMessage("Claim #" + id + " approved successfully!", "Success", JOptionPane.INFORMATION_MESSAGE);
-                        break;
+                // Get the claim ID from table
+                int claimId = (int) tableModel.getValueAt(row, 0);
+                String empEmail = (String) tableModel.getValueAt(row, 2); // Get email from table
+                String empName = (String) tableModel.getValueAt(row, 1); // Get employee name
+                double amount = Double.parseDouble(
+                    tableModel.getValueAt(row, 4).toString().replace("Rs ", "")
+                );
+                
+                // Update in database using DAO
+                ClaimDAO dao = new ClaimDAO();
+                boolean dbSuccess = dao.updateClaimStatus(claimId, "Approved");
+                
+                if (dbSuccess) {
+                    // Send approval email
+                    sendApprovalEmail(empEmail, empName, claimId, amount, "Approved");
+                    
+                    // Also update in-memory list for UI
+                    for (ExpenseClaim claim : claims) {
+                        if (claim.getId() == claimId) {
+                            claim.setStatus("Approved");
+                            break;
+                        }
                     }
+                    
+                    refreshTable(tableModel);
+                    showNetworkActivity("Approval", "192.168.30.10", "192.168.40.40 (DB-Server)");
+                    showStyledMessage(
+                        "Claim #" + claimId + " approved successfully!\n\n" +
+                        "✓ Status updated in PostgreSQL database\n" +
+                        "✓ Email notification sent to employee\n" +
+                        "✓ Employee: " + empName + "\n" +
+                        "✓ Email: " + empEmail, 
+                        "Success", 
+                        JOptionPane.INFORMATION_MESSAGE
+                    );
+                } else {
+                    showStyledMessage(
+                        "Failed to update claim status in database!", 
+                        "Error", 
+                        JOptionPane.ERROR_MESSAGE
+                    );
                 }
             } else {
                 showStyledMessage("Please select a claim!", "Warning", JOptionPane.WARNING_MESSAGE);
             }
         });
         
+        // REJECT BUTTON - with rejection reason and email notification
         rejectBtn.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row >= 0) {
-                int id = (int) tableModel.getValueAt(row, 0);
-                for (ExpenseClaim claim : claims) {
-                    if (claim.getId() == id) {
-                        claim.setStatus("Rejected");
-                        refreshTable(tableModel);
-                        showNetworkActivity("Rejection", "192.168.30.10", claim.getEmployeeIP());
-                        showStyledMessage("Claim #" + id + " rejected!", "Info", JOptionPane.INFORMATION_MESSAGE);
-                        break;
+                // Get the claim ID from table
+                int claimId = (int) tableModel.getValueAt(row, 0);
+                String empEmail = (String) tableModel.getValueAt(row, 2); // Get email from table
+                String empName = (String) tableModel.getValueAt(row, 1); // Get employee name
+                double amount = Double.parseDouble(
+                    tableModel.getValueAt(row, 4).toString().replace("Rs ", "")
+                );
+                
+                // Ask for rejection reason
+                String reason = JOptionPane.showInputDialog(
+                    this,
+                    "Please enter rejection reason:",
+                    "Rejection Reason",
+                    JOptionPane.QUESTION_MESSAGE
+                );
+                
+                if (reason == null || reason.trim().isEmpty()) {
+                    showStyledMessage("Rejection reason is required!", "Warning", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                
+                // Update in database using DAO
+                ClaimDAO dao = new ClaimDAO();
+                boolean dbSuccess = dao.updateClaimStatus(claimId, "Rejected");
+                
+                if (dbSuccess) {
+                    // Send rejection email with reason
+                    sendRejectionEmail(empEmail, empName, claimId, amount, reason);
+                    
+                    // Also update in-memory list for UI
+                    for (ExpenseClaim claim : claims) {
+                        if (claim.getId() == claimId) {
+                            claim.setStatus("Rejected");
+                            break;
+                        }
                     }
+                    
+                    refreshTable(tableModel);
+                    showNetworkActivity("Rejection", "192.168.30.10", "192.168.40.40 (DB-Server)");
+                    showStyledMessage(
+                        "Claim #" + claimId + " rejected successfully!\n\n" +
+                        "✓ Status updated in PostgreSQL database\n" +
+                        "✓ Email notification sent to employee\n" +
+                        "✓ Employee: " + empName + "\n" +
+                        "✓ Reason: " + reason, 
+                        "Success", 
+                        JOptionPane.INFORMATION_MESSAGE
+                    );
+                } else {
+                    showStyledMessage(
+                        "Failed to update claim status in database!", 
+                        "Error", 
+                        JOptionPane.ERROR_MESSAGE
+                    );
                 }
             } else {
                 showStyledMessage("Please select a claim!", "Warning", JOptionPane.WARNING_MESSAGE);
             }
         });
         
-        refreshBtn.addActionListener(e -> refreshTable(tableModel));
+        // REFRESH BUTTON - load from database
+        refreshBtn.addActionListener(e -> {
+            // Fetch latest claims from database
+            ClaimDAO dao = new ClaimDAO();
+            ArrayList<ClaimData> dbClaims = dao.getAllClaims();
+            
+            // Clear and populate table with database data
+            tableModel.setRowCount(0);
+            
+            for (ClaimData dbClaim : dbClaims) {
+                String proofFileName = dbClaim.getProofname() != null ? 
+                    "📎 " + dbClaim.getProofname() : "No proof";
+                
+                tableModel.addRow(new Object[]{
+                    dbClaim.getSrNo(),
+                    dbClaim.getEmpname(),
+                    dbClaim.getEmail(),
+                    "N/A", // Type (not in DB)
+                    "Rs " + dbClaim.getAmount(),
+                    dbClaim.getStatus(),
+                    new SimpleDateFormat("dd-MM-yyyy HH:mm").format(dbClaim.getCreatedAt()),
+                    proofFileName
+                });
+            }
+            
+            showStyledMessage(
+                "Refreshed!\n\nLoaded " + dbClaims.size() + " claims from database", 
+                "Success", 
+                JOptionPane.INFORMATION_MESSAGE
+            );
+        });
+        
         logoutBtn.addActionListener(e -> cardLayout.show(mainPanel, "LOGIN"));
         
         panel.addComponentListener(new ComponentAdapter() {
@@ -1231,6 +1366,8 @@ public class ExpenseClaimSystem extends JFrame {
         
         return panel;
     }
+    
+    
     
     // Network Topology Panel
     private JPanel createNetworkPanel() {
@@ -1268,7 +1405,7 @@ public class ExpenseClaimSystem extends JFrame {
             "                            |\n" +
             "                   [ Core-Switch - 3560-24PS ]\n" +
             "                   (Inter-VLAN Routing Enabled)\n" +
-            "              ______|___________________|_______\n" +
+            "              _____||_\n" +
             "             |                          |      |\n" +
             "      [ Employee-Switch ]         [ Finance ]  [ Servers ]\n" +
             "        (VLAN 10)                  (VLAN 30)   (VLAN 40)\n" +
@@ -1335,10 +1472,20 @@ public class ExpenseClaimSystem extends JFrame {
                 proofFileName = "📎 " + proofFile.getName();
             }
             
+            // Extract employee name and email
+            String fullEmployee = claim.getEmployee();
+            String empName = fullEmployee;
+            String empEmail = "";
+            
+            if (fullEmployee.contains("(") && fullEmployee.contains(")")) {
+                empName = fullEmployee.substring(0, fullEmployee.indexOf("(")).trim();
+                empEmail = fullEmployee.substring(fullEmployee.indexOf("(") + 1, fullEmployee.indexOf(")"));
+            }
+            
             model.addRow(new Object[]{
                 claim.getId(),
-                claim.getEmployee(),
-                claim.getDepartment(),
+                empName,
+                empEmail,
                 claim.getType(),
                 "Rs " + claim.getAmount(),
                 claim.getStatus(),
@@ -1382,6 +1529,111 @@ public class ExpenseClaimSystem extends JFrame {
     
     private void showStyledMessage(String message, String title, int messageType) {
         JOptionPane.showMessageDialog(this, message, title, messageType);
+    }
+    
+    // ========== EMAIL HELPER METHODS ==========
+    
+    // Helper method to send approval email
+    private void sendApprovalEmail(String recipient, String empName, int claimId, double amount, String status) {
+        final String sender = "aarusheepandagare@gmail.com";
+        final String password = "zgqt mklx fxsd tfyk";
+        final String host = "smtp.gmail.com";
+
+        Properties props = new Properties();
+        props.put("mail.smtp.auth", "true");
+        props.put("mail.smtp.starttls.enable", "true");
+        props.put("mail.smtp.host", host);
+        props.put("mail.smtp.port", "587");
+
+        Session session = Session.getInstance(props, new javax.mail.Authenticator() {
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(sender, password);
+            }
+        });
+
+        try {
+            MimeMessage message = new MimeMessage(session);
+            message.setFrom(new InternetAddress(sender));
+            message.addRecipient(Message.RecipientType.TO, new InternetAddress(recipient));
+            message.setSubject("Expense Claim Approved - Claim #" + claimId);
+            message.setText(
+                "Hello " + empName + ",\n\n" +
+                "Great news! Your expense claim has been APPROVED by the Finance team.\n\n" +
+                "Claim Details:\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+                "Claim ID: #" + claimId + "\n" +
+                "Amount: ₹" + amount + "\n" +
+                "Status: " + status + "\n\n" +
+                "The approved amount will be processed and credited to your account shortly.\n\n" +
+                "If you have any questions, please contact the Finance Department.\n\n" +
+                "Thank you,\n" +
+                "Finance Team\n" +
+                "Chai.Co"
+            );
+            Transport.send(message);
+            System.out.println("✅ Approval email sent to: " + recipient);
+        } catch (MessagingException e) {
+            System.err.println("✗ Failed to send approval email to: " + recipient);
+            e.printStackTrace();
+            showStyledMessage(
+                "Warning: Status updated but email failed to send!\n" + e.getMessage(),
+                "Email Error",
+                JOptionPane.WARNING_MESSAGE
+            );
+        }
+    }
+
+    // Helper method to send rejection email
+    private void sendRejectionEmail(String recipient, String empName, int claimId, double amount, String reason) {
+        final String sender = "aarusheepandagare@gmail.com";
+        final String password = "zgqt mklx fxsd tfyk";
+        final String host = "smtp.gmail.com";
+
+        Properties props = new Properties();
+        props.put("mail.smtp.auth", "true");
+        props.put("mail.smtp.starttls.enable", "true");
+        props.put("mail.smtp.host", host);
+        props.put("mail.smtp.port", "587");
+
+        Session session = Session.getInstance(props, new javax.mail.Authenticator() {
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(sender, password);
+            }
+        });
+
+        try {
+            MimeMessage message = new MimeMessage(session);
+            message.setFrom(new InternetAddress(sender));
+            message.addRecipient(Message.RecipientType.TO, new InternetAddress(recipient));
+            message.setSubject("Expense Claim Rejected - Claim #" + claimId);
+            message.setText(
+                "Hello " + empName + ",\n\n" +
+                "We regret to inform you that your expense claim has been REJECTED by the Finance team.\n\n" +
+                "Claim Details:\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+                "Claim ID: #" + claimId + "\n" +
+                "Amount: ₹" + amount + "\n" +
+                "Status: Rejected\n\n" +
+                "Reason for Rejection:\n" +
+                reason + "\n\n" +
+                "If you believe this decision was made in error or need clarification,\n" +
+                "please contact the Finance Department.\n\n" +
+                "You may submit a revised claim with proper documentation.\n\n" +
+                "Thank you,\n" +
+                "Finance Team\n" +
+                "Chai.Co"
+            );
+            Transport.send(message);
+            System.out.println("✅ Rejection email sent to: " + recipient);
+        } catch (MessagingException e) {
+            System.err.println("✗ Failed to send rejection email to: " + recipient);
+            e.printStackTrace();
+            showStyledMessage(
+                "Warning: Status updated but email failed to send!\n" + e.getMessage(),
+                "Email Error",
+                JOptionPane.WARNING_MESSAGE
+            );
+        }
     }
     
     public static void main(String[] args) {
