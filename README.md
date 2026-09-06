@@ -150,11 +150,5 @@ java -cp ".:postgresql-<version>.jar:javax.mail.jar" ExpenseClaimSystem
 java -cp ".:postgresql-<version>.jar:javax.mail.jar" SendStatusEmails
 ```
 
----
 
-## Security Notes
 
-- **Credentials:** database and email credentials are currently embedded directly in source. Move these to environment variables or an untracked configuration file, and rotate the previously committed Gmail app password and database password.
-- **Proof file storage:** proof documents are stored as raw binary (`bytea`) directly in the database with no file-type or size validation at the point of insertion. Consider validating file type and enforcing a maximum size before insertion.
-- **SQL access:** all queries in `ClaimDAO.java` use parameterized statements (`PreparedStatement`), which is the correct pattern for preventing SQL injection — this should be preserved in any future changes.
-- **Authentication:** the current description does not indicate a password-based login distinguishing employees from the Finance team at the database/access-control level. If this distinction is enforced only in the UI, consider adding server-side (or DB-level) role checks before relying on this system for real financial approvals.
